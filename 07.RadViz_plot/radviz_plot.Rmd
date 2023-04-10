@@ -1,0 +1,140 @@
+---
+title: "Radviz可视化多维数据分布"
+output: html_notebook
+---
+`Radviz` 包利用极坐标的方式可视化多为数据的分布情况，针对高维数据有很好呈现效果，比如展示marker再不同细胞内的富集情况等。使用方式如下：
+1. 首先要安装并载入`Radviz`：
+```{r}
+install.packages('Radviz')
+library(Radviz)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+```
+
+2. 接下来我们导入测试数据集`bodenmiller`：
+```{r}
+install.packages('bodenmiller')
+library(bodenmiller)
+data(refPhenoMat)
+data(refFuncMat)
+data(refAnnots)
+ref.df <- data.frame(refAnnots,
+                     refPhenoMat,
+                     refFuncMat)
+head(ref.df)
+```
+
+3. 在画图之前需要对数据进行标准化：
+这一步的目的是把每个维度的数据标准化到[0,1]之间,以便画图,首先我们构建一个标准化函数对矩进行标准化。`do.L`是对一个向量做0-1标准化。这个函数的作用是移除每个向量的outliner数据，主要是移除数据的前0.5%和后0.5%。
+```{r}
+trans <- function(coln) do.L(coln,fun=function(x) quantile(x,c(0.005,0.995)))
+```
+也就如下的虚线两侧的部分：
+```{r}
+hist(ref.df$CD3)
+abline(v=quantile(ref.df$CD3,c(0.005,0.995)),
+       col=2,lty=2)
+```
+4.定义锚点：
+这里使用`make.S`把每个维度在图上的坐标确定下来，也就是他们在圆圈上面的每个位置规定好,主要是按照维度个数均分这个圆圈，每两个维度之间的夹角是相等的，`make.S`输入是可以是向量或者是`list`，向量可以是维度名字，也可以是一个数字代表有几各维度，如果是`list`的话,好像坐标先按照list的个数先平均分360度，然后再按照每一个list中元素的个数再均分自己每个list中的那一段区间（好像是这样）。不管什么输入，返回值是一个两列的矩阵，矩阵行名是每个维度的名字，两列分别是x和y的坐标。
+
+```{r}
+ct.S <- make.S(dimnames(refPhenoMat)[[2]])
+```
+4. 优化锚点的位置：
+因为不同的锚点的排序会影响图形的展示效果，因此需要对锚点的排序进行优化，然后形成新的锚点矩阵。
+①、首先计算余弦相似性矩阵，评估各维度之间的相似性
+
+```{r}
+## compute the similarity matrix
+ct.sim <- cosine(as.matrix(ref.df[,row.names(ct.S)]))
+
+```
+②、然后根据相似性矩阵结合锚点位点矩阵计算可视化效率值，这里有`in.da`和 `rv.da`两个函数：
+```{r}
+## the current Radviz-independent measure of projection efficiency
+in.da(ct.S,ct.sim)
+rv.da(ct.S,ct.sim)
+```
+其中`in.da`的结果，其数值绝对值越大表明锚点的排序越好，而`rv.da`相反，数值越小锚点的顺序越优。
+
+③、接下来我们需要优化锚点的顺序：
+```{r}
+optim.ct <- do.optimRadviz(ct.S,ct.sim,iter=100,n=1000)
+ct.S <- make.S(get.optim(optim.ct))
+ct.S
+```
+当然，如果你要自定义你的起始的锚点也是可以的：
+```{r}
+ct.S <- recenter(ct.S,'CD3')
+```
+值得注意的是，这里只是定义了新的顶点位置，锚点的排序顺序还是不会变的。
+
+5. 可视化结果
+我们先对输入的矩阵进行标准化，默认是用`do.L`把每个维度标准化到[0,1]之间。
+```{r}
+ct.rv <- do.radviz(ref.df,ct.S,trans=trans)
+```
+因为我们在前面定义了trans函数其实和`do.L`函数没有太大区别，就是去掉了原始数据首尾0.5%的部分（可以认为是异常值），然后将剩下的数据来进行标准化而已。
+还有就是`ref.df`中可以包含除了锚点的其他列，只是在计算的时候不用。
+我们可以查看这一步产生的对象，其中包含了ggplot2的对象：
+```{r}
+dim(ct.rv)
+```
+然后也可以看数据的内容：
+```{r}
+head(ct.rv)
+```
+最后我们也可以直接把这个图画出来：
+```{r}
+plot(ct.rv,anchors.only=FALSE)
+```
+因为`ct.rv`对象是包含ggplot2的一个S3对象，所以可以按照ggplot2的语法来进行修改图形。例如这里我利用`geom_point()`函数把点的颜色和细胞类型结合起来了，然后改变了点的形状和透明度。
+
+```{r}
+p <- plot(ct.rv)+
+  geom_circle(aes(x0=0,y0=0,r=1))
+  geom_point(aes(x=0,y=0),size=100, shape=1, color="black")+
+  geom_point(aes(color=Cells), alpha=0.5,shape=16)
+p
+```
+此外，我们还可以改变成不同的形式，比如将密度凸显出来：
+```{r}
+smoothRadviz(ct.rv)
+```
+`smoothRadviz`也只是`stat_density2d`函数的一个包装而已。所以这个函数同样也可以用ggplot2对象的操作来修改:
+这里我们在上述基础之上增加散点图。
+```{r}
+smoothRadviz(ct.rv)+
+  geom_point(shape='.',alpha=1/5)
+```
+6.蜂巢图可视化：
+可以把上述密度分布图化成蜂巢图的形式：
+这里的默认颜色是细胞数目的统计
+```{r}
+hexplot(ct.rv)
+```
+我们也可以把颜色换成某一个维度，比如`CD4`
+```{r}
+hexplot(ct.rv, color="CD4")
+```
+7. 如果我们只是药画点图，可以直接用他的`bubbleRadviz()`函数：
+```{r}
+bubbleRadviz(ct.rv,group = 'Cells')
+```
+
+```{r}
+x <- ct.rv
+p <- x$proj
+
+
+
+```
+
+```{r}
+ggplot() + geom_rect(aes(xmin=-1,ymin=-1,xmax=1,ymax=1), fill=NA) + coord_polar() 
+
+```
+
+
